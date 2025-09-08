@@ -1,5 +1,5 @@
 # =========================
-# Azure DevOps Pipeline for Commuter Service
+# Azure DevOps Pipeline for Driver Service (Self-hosted Agent)
 # =========================
 
 trigger:
@@ -13,72 +13,98 @@ pr:
     include:
       - main
 
-pool:
-  vmImage: 'ubuntu-latest'
-
 variables:
   javaVersion: '17'
-  artifactName: 'commuter-service'
-  buildDir: '$(System.DefaultWorkingDirectory)/target'
+  artifactName: 'driver-service'
+  buildDir: '$(Build.SourcesDirectory)/target'
 
-steps:
-  # 1️⃣ Checkout code
-  - task: Checkout@1
-
-  # 2️⃣ Setup JDK
-  - task: JavaToolInstaller@0
-    inputs:
-      versionSpec: '$(javaVersion)'
-      jdkArchitecture: 'x64'
-      jdkSourceOption: 'PreInstalled'
-
-  # 3️⃣ Cache Maven dependencies
-  - task: Cache@2
-    inputs:
-      key: 'maven | "$(Agent.OS)" | **/pom.xml'
-      restoreKeys: |
-        maven | "$(Agent.OS)"
-      path: ~/.m2/repository
-
-  # 4️⃣ Build with Maven
-  - task: Maven@3
-    displayName: 'Build with Maven'
-    inputs:
-      mavenPomFile: 'pom.xml'
-      goals: 'clean package -DskipTests'
-
-  # 5️⃣ Publish build artifact
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact'
-    inputs:
-      PathtoPublish: '$(buildDir)'
-      ArtifactName: '$(artifactName)'
-      publishLocation: 'Container'
-
-# =========================
-# Deployment Stage
-# =========================
 stages:
-- stage: DeployToAzure
-  displayName: 'Deploy Commuter Service'
-  dependsOn: []
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))  # only on main branch
+# =========================
+# 1️⃣ Build Stage
+# =========================
+- stage: Build
+  displayName: 'Build Stage'
   jobs:
-    - job: Deploy
-      displayName: 'Deploy to Azure App Service'
+    - job: BuildJob
+      displayName: 'Build Driver Service'
       pool:
-        vmImage: 'ubuntu-latest'
+        name: BusBuddyPool     
+        demands:
+          - agent.name -equals MyAgent   
+      steps:
+        - checkout: self
+
+        # Build with Maven
+        - task: Maven@3
+          displayName: 'Build with Maven'
+          inputs:
+            mavenPomFile: 'pom.xml'
+            goals: 'clean package -DskipTests'
+
+        # Publish build artifact
+        - task: PublishBuildArtifacts@1
+          displayName: 'Publish Artifact'
+          inputs:
+            PathtoPublish: '$(buildDir)'
+            ArtifactName: '$(artifactName)'
+            publishLocation: 'Container'
+
+
+# =========================
+# 2️⃣ Deploy to Dev/Test (Feature Branches)
+# =========================
+- stage: DeployDev
+  displayName: 'Deploy to Dev/Test'
+  dependsOn: Build
+  condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'))
+  jobs:
+    - job: DeployDevJob
+      displayName: 'Deploy to Dev/Test App Service'
+      pool:
+        name: BusBuddyPool
+        demands:
+          - agent.name -equals MyAgent
       steps:
         - task: DownloadBuildArtifacts@1
           inputs:
             buildType: 'current'
             downloadType: 'single'
             artifactName: '$(artifactName)'
-            downloadPath: '$(System.DefaultWorkingDirectory)'
+            downloadPath: '$(Pipeline.Workspace)'
 
         - task: AzureWebApp@1
-          displayName: 'Deploy to Azure App Service'
+          displayName: 'Deploy to Dev/Test App Service'
           inputs:
-            azureSubscription: '<your-service-connection>'
-            appName: '<your-app-service-name>'
-            package: '$(System.DefaultWorkingDirectory)/$(artifactName)/*.jar'
+            azureSubscription: 'azure-busbuddy-connection'
+            appName: 'driver-service-app'
+            package: '$(Pipeline.Workspace)/$(artifactName)/*.jar'
+
+
+# =========================
+# 3️⃣ Deploy to Prod (Main Branch)
+# =========================
+- stage: DeployProd
+  displayName: 'Deploy to Production'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+    - job: DeployProdJob
+      displayName: 'Deploy to Production App Service'
+      pool:
+        name: BusBuddyPool
+        demands:
+          - agent.name -equals MyAgent
+      steps:
+        - task: DownloadBuildArtifacts@1
+          inputs:
+            buildType: 'current'
+            downloadType: 'single'
+            artifactName: '$(artifactName)'
+            downloadPath: '$(Pipeline.Workspace)'
+
+        - task: AzureWebApp@1
+          displayName: 'Deploy to Production App Service'
+          inputs:
+            azureSubscription: 'azure-busbuddy-connection'
+            appName: 'driver-service-app'
+            package: '$(Pipeline.Workspace)/$(artifactName)/*.jar'
